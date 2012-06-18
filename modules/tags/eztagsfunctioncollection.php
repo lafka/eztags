@@ -117,6 +117,23 @@ class eZTagsFunctionCollection
         if ( $parentTagID !== false )
             $filterArray['parent_id'] = (int) $parentTagID;
 
+        $ini = eZINI::instance('eztags.ini');
+
+        $forceIsolation = ( 'enabled' === $ini->variable( 'SiteaccessSettings',
+                                                          'ForceTagIsolation') );
+        $defaultRootTagID = (int) $ini->variable( 'SiteaccessSettings',
+                                                  'DefaultRootTagID');
+
+        if ( $forceIsolation )
+        {
+            if ( 0 === $parentTagID )
+            {
+                $parentTagID = $defaultRootTagID;
+            } else {
+                $filterArray['path_string'] = array('like', '%/' . $defaultRootTagID . '/%');
+            }
+        }
+
         $result = eZPersistentObject::fetchObjectList( eZTagsObject::definition(), null,
                                                        $filterArray,
                                                        array( 'modified' => 'desc' ),

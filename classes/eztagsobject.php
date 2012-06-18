@@ -7,6 +7,9 @@
  */
 class eZTagsObject extends eZPersistentObject
 {
+    private static $forceIsolation   = null;
+    private static $defaultRootTagID = 0;
+
     /**
      * Constructor
      *
@@ -16,6 +19,11 @@ class eZTagsObject extends eZPersistentObject
         if ( !isset( $row['remote_id'] ) || !$row['remote_id'] )
         {
             $row['remote_id'] = self::generateRemoteID();
+        }
+
+        if ( self::isIsolated() && !isset( $row['parent_id'] ) )
+        {
+            $row['parent_id'] = self::getRootTagID();
         }
 
         parent::__construct( $row );
@@ -151,7 +159,17 @@ class eZTagsObject extends eZPersistentObject
      */
     function getParent()
     {
-        return self::fetch( $this->attribute( 'parent_id' ) );
+        $id = $this->attribute( 'parent_id' );
+
+        //  Make sure there is no fatal errors if fetching parent outside limits
+        if ( self::isIsolated() )
+        {
+            if ( 0 === (int) $id )
+            {
+                $id = self::getRootTagID();
+            }
+        }
+        return self::fetch( $id );
     }
 
     /**
@@ -185,6 +203,9 @@ class eZTagsObject extends eZPersistentObject
         // and attribute version, so just use SQL to fetch all related object ids in one go
         $tagID = (int) $this->attribute( 'id' );
 
+        /**
+         * @todo Specify tag isolation
+         */
         $db = eZDB::instance();
         $result = $db->arrayQuery( "SELECT DISTINCT(o.id) AS object_id FROM eztags_attribute_link l
                                    INNER JOIN ezcontentobject o ON l.object_id = o.id
@@ -331,7 +352,9 @@ class eZTagsObject extends eZPersistentObject
             return $iconMap[$tag->attribute( 'id' )];
         }
 
-        while ( $tag->attribute( 'parent_id' ) > 0 )
+        $match = (self::isIsolated()) ? self::getRootTagID() : 0;
+
+        while ( $tag->attribute( 'parent_id' ) > $match )
         {
             $tag = $tag->getParent();
             if ( array_key_exists( $tag->attribute( 'id' ), $iconMap ) && !empty( $iconMap[$tag->attribute( 'id' )] ) )
@@ -416,7 +439,40 @@ class eZTagsObject extends eZPersistentObject
      */
     static function fetch( $id )
     {
-        return eZPersistentObject::fetchObject( self::definition(), null, array( 'id' => $id ) );
+        $params = array( 'id' => $id );
+
+        if ( self::isIsolated() )
+        {
+            if ( 0 === (int) $id )
+            {
+                $params['id'] = self::getRootTagID();
+            } else {
+                $params['path_string'] = array('like', '%/' . self::getRootTagID() . '/%');
+            }
+        }
+
+        /*
+        var_dump(__METHOD__, $params);
+        echo "<pre>";
+        foreach (debug_backtrace() as $f) {
+            printf("%-80s:%-5d %25s::%-25s", str_replace(eZSys::rootDir(), '', $f['file']), $f['line'], $f['class'], $f['function']);
+            foreach ($f['args'] as $a) {
+                if (is_string($a))
+                    echo "(" . gettype($a) . ") " . substr($a, 0, 15);
+                elseif (!is_scalar($a))
+                    echo "(" . gettype($a) . ")" . (is_object($a) ? get_class($a) : '');
+                else
+                    echo " (" . gettype($a) . ") " . (string) $a;
+
+                echo ', ';
+            }
+            
+            echo "\r\n";
+        }
+        echo "</pre>";
+        */
+
+        return eZPersistentObject::fetchObject( self::definition(), null, $params );
     }
 
     /**
@@ -429,6 +485,14 @@ class eZTagsObject extends eZPersistentObject
      */
     static function fetchList( $params, $limits = null, $asObject = true, $sorts = null )
     {
+        /**
+         * @todo this should NOT override default param?
+         */
+        if ( self::isIsolated() && 0 !== self::getRootTagID())
+        {
+            $params['path_string'] = array('like', '%/' . self::getRootTagID() . '/%');
+        }
+
         $tagsList = eZPersistentObject::fetchObjectList( self::definition(), null, $params, $sorts, $limits );
 
         if ( $asObject )
@@ -454,6 +518,14 @@ class eZTagsObject extends eZPersistentObject
      */
     static function fetchListCount( $params )
     {
+        /**
+         * @todo this should NOT override default param?
+         */
+        if ( self::isIsolated() && 0 !== self::getRootTagID())
+        {
+            $params['path_string'] = array('like', '%/' . self::getRootTagID() . '/%');
+        }
+
         return eZPersistentObject::count( self::definition(), $params );
     }
 
@@ -466,6 +538,11 @@ class eZTagsObject extends eZPersistentObject
      */
     static function fetchByParentID( $parentID )
     {
+        if ( self::isIsolated() && 0 === (int) $parentID )
+        {
+            $parentID = self::getRootTagID();
+        }
+
         return eZPersistentObject::fetchObjectList( self::definition(), null, array( 'parent_id' => $parentID, 'main_tag_id' => 0 ) );
     }
 
@@ -478,6 +555,11 @@ class eZTagsObject extends eZPersistentObject
      */
     static function childrenCountByParentID( $parentID )
     {
+        if ( self::isIsolated() && 0 === $parentID )
+        {
+            $parentID = self::getRootTagID();;
+        }
+
         return eZPersistentObject::count( self::definition(), array( 'parent_id' => $parentID, 'main_tag_id' => 0 ) );
     }
 
@@ -511,6 +593,7 @@ class eZTagsObject extends eZPersistentObject
      * @static
      * @param mixed $keyword
      * @return array
+     * @todo Add constraint for isolated tags
      */
     static function fetchByKeyword( $keyword )
     {
@@ -565,6 +648,13 @@ class eZTagsObject extends eZPersistentObject
      */
     static function fetchByPathString( $pathString )
     {
+        if ( self::isIsolated() )
+        {
+            if (false === strpos($pathString, '/' . self::getRootTagID() . '/'))
+            {
+                $pathString = '%/' . self::getRootTagID() . '/%' . $pathString;
+            }
+        }
         return eZPersistentObject::fetchObjectList( self::definition(), null,
                                                     array( 'path_string' => array( 'like', $pathString . '%' ),
                                                            'main_tag_id' => 0 ) );
@@ -582,6 +672,16 @@ class eZTagsObject extends eZPersistentObject
     {
         $params = array( 'keyword' => array( 'like', trim( $keyword ) ), 'parent_id' => $parentID );
 
+        if ( self::isIsolated() )
+        {
+            if ( 0 === (int) $tagID )
+            {
+                $tagID = self::getRootTagID();
+            } else {
+                $params['path_string'] = array('like', '%/' . self::getRootTagID() . '/%');
+            }
+        }
+
         if ( $tagID > 0 )
         {
             $params['id'] = array( '!=', $tagID );
@@ -598,6 +698,7 @@ class eZTagsObject extends eZPersistentObject
      *
      * @static
      * @param eZTagsObject $rootTag
+     * @todo Validate both tag id's to be descendandt of you know what
      */
     static function recursiveTagDelete( $rootTag )
     {
@@ -634,6 +735,7 @@ class eZTagsObject extends eZPersistentObject
      * @static
      * @param eZTagsObject $tag
      * @param eZTagsObject $targetTag
+     * @todo Validate both tag id's to be descendandt of you know what
      */
     static function moveChildren( $tag, $targetTag )
     {
@@ -669,8 +771,10 @@ class eZTagsObject extends eZPersistentObject
         if ( !is_numeric( $tagID ) || (int) $tagID < 0 )
             return false;
 
-        $tag = eZTagsObject::fetch( (int) $tagID );
-        if ( (int) $tagID > 0 && !$tag instanceof eZTagsObject && $tag->attribute( 'main_tag_id' ) != 0 )
+        $tagID = (int) $tagID;
+
+        $tag = eZTagsObject::fetch( $tagID );
+        if ( $tagID > 0 && !$tag instanceof eZTagsObject && $tag->attribute( 'main_tag_id' ) != 0 )
             return false;
 
         if ( !is_array( $params ) )
@@ -685,10 +789,24 @@ class eZTagsObject extends eZPersistentObject
 
         $fetchParams = array();
 
-        if ( (int) $tagID > 0 )
+        if ( self::isIsolated() && 0 !== self::getRootTagID() )
         {
-            $fetchParams['path_string'] = array( 'like', '%/' . (string) ( (int) $tagID ) . '/%' );
-            $fetchParams['id'] = array( '!=', (int) $tagID );
+            $fetchParams['path_string'] = array( 'like', '%/' . self::getRootTagID() . '/%' );
+
+            /**
+             * @todo This will make tags directly underneath $defaultRootTagID be inaccessible
+             */
+            if ( $tagID > 0 && $tagID !== self::getRootTagID() )
+            {
+                $fetchParams['path_string'][1] .= '%/' . $tagID . '/%';
+                $fetchParams['id'] = array( '!=', $tagID );
+            }
+        }
+
+        if ( $tagID > 0 && !isset( $fetchParams['path_string'] ) )
+        {
+            $fetchParams['path_string'] = array( 'like', '%/' . $tagID . '/%' );
+            $fetchParams['id'] = array( '!=', $tagID );
         }
 
         if ( !$includeSynonyms )
@@ -781,8 +899,10 @@ class eZTagsObject extends eZPersistentObject
         if ( !is_numeric( $tagID ) || (int) $tagID < 0 )
             return 0;
 
-        $tag = eZTagsObject::fetch( (int) $tagID );
-        if ( (int) $tagID > 0 && !$tag instanceof eZTagsObject && $tag->attribute( 'main_tag_id' ) != 0 )
+        $tagId = (int) $tagID;
+
+        $tag = eZTagsObject::fetch( $tagID );
+        if ( $tagID > 0 && !$tag instanceof eZTagsObject && $tag->attribute( 'main_tag_id' ) != 0 )
             return 0;
 
         if ( !is_array( $params ) )
@@ -794,11 +914,25 @@ class eZTagsObject extends eZPersistentObject
 
         $fetchParams = array();
 
-        if ( (int) $tagID > 0 )
+        if ( self::isIsolated() && 0 !== self::getRootTagID() )
+        {
+            $fetchParams['path_string'] = array( 'like', '%/' . self::getRootTagID() . '/%' );
+
+            /**
+             * @todo This will make tags directly underneath $defaultRootTagID be inaccessible
+             */
+            if ( $tagID > 0 && $tagID !== self::getRootTagID() )
+            {
+                $fetchParams['path_string'][1] .= '%/' . $tagID . '/%';
+            }
+        }
+
+        if ( $tagID > 0 && !isset( $fetchParams['path_string'] ) )
         {
             $fetchParams['path_string'] = array( 'like', '%/' . (string) ( (int) $tagID ) . '/%' );
-            $fetchParams['id'] = array( '!=', (int) $tagID );
+            $fetchParams['id'] = array( '!=', $tagID );
         }
+
 
         if ( !$includeSynonyms )
             $fetchParams['main_tag_id'] = 0;
@@ -841,9 +975,16 @@ class eZTagsObject extends eZPersistentObject
      */
     static function fetchByRemoteID( $remoteID )
     {
-        return eZPersistentObject::fetchObject( self::definition(), null, array(
-            'remote_id' => $remoteID
-        ) );
+        $cond = array(
+            'remote_id' => $remoteID,
+        );
+
+        if ( self::isIsolated() && 0 !== self::getRootTagID() )
+        {
+            $cond['path_string'] = array('like',  '%/' . self::getRootTagID() . '/%');
+        }
+
+        return eZPersistentObject::fetchObject( self::definition(), null, $cond );
     }
 
     /**
@@ -870,6 +1011,51 @@ class eZTagsObject extends eZPersistentObject
     function isSynonym()
     {
         return $this->attribute( 'main_tag_id' ) && $this->attribute( 'main_tag_id' ) !== $this->attribute( 'id' );
+    }
+
+    /**
+     * Check for tag isolation
+     *
+     * @return bool Whetevere isolation is active
+     */
+    private static function isIsolated () {
+        if ( null === self::$forceIsolation )
+        {
+            self::getIsolationSettings();
+        }
+
+        return self::$forceIsolation;
+    }
+
+    /**
+     * Get the root tag id for tag isolation
+     *
+     * @return integer The root tag id based on isolation settings
+     */
+    private static function getRootTagID ()
+    {
+        if ( null === self::$forceIsolation )
+        {
+            self::getIsolationSettings();
+        }
+
+        return self::$defaultRootTagID;
+    }
+
+    /**
+     * Retreive the default settings for tag isolation
+     *
+     * @return void
+     */
+    private static function getIsolationSettings ()
+    {
+        $ini = eZINI::instance('eztags.ini');
+
+        self::$forceIsolation = ( 'enabled' === $ini->variable( 'SiteaccessSettings',
+                                                                'ForceTagIsolation') );
+        self::$defaultRootTagID = (int) $ini->variable( 'SiteaccessSettings',
+                                                        'DefaultRootTagID');
+        unset($ini);
     }
 }
 
